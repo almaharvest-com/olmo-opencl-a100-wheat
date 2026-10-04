@@ -1,0 +1,6 @@
+# Copy to ~/maahr.conf in WSL and run: chmod 600 ~/maahr.conf
+# Do NOT add a password line: you type the VPN password at every connection.
+host = maahr.fortiddns.com
+port = 10443
+username = almauser1
+set-dns = 0

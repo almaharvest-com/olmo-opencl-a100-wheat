@@ -1,0 +1,8 @@
+{
+  "command": "/maahr/home/almauser1/dev/OLMO_opencl/olmo_cl train dataset=/maahr/home/almauser1/RSDATA/alma_wheat_festival/dataset weights=/maahr/home/almauser1/models/olmoearth/OlmoEarth-v1-Tiny/weights.pth norm=/maahr/home/almauser1/dev/OLMO_opencl/data/s2_norm.tsv crops=/maahr/home/almauser1/dev/OLMO_opencl/data/val_test_crops.tsv out=/maahr/home/almauser1/RSDATA/alma_wheat_festival/trainer_checkpoints epochs=80 seed=42 device=gpu platform= overwrite=0",
+  "device": "NVIDIA A100-SXM4-80GB",
+  "platform": "NVIDIA CUDA",
+  "timestep_order": ["sentinel2.2", "sentinel2.4", "sentinel2.1", "sentinel2.3", "sentinel2", "sentinel2.5"],
+  "dim": 192,
+  "head_file": "W[2][192] then b[2], float32"
+}
