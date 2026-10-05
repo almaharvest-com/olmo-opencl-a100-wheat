@@ -1,6 +1,6 @@
 # Wheat segmentation on a GPU server: setup, training and inference, step by step
 
-Written 2026-10-04. This guide repeats, on any similar GPU server, what we did on the Maahr **g13** node: build the OLMO_opencl trainer, import the Sharjah wheat dataset, train the wheat-segmentation head on a frozen OlmoEarth-v1-Tiny encoder, and produce wheat maps.
+Written 2026-10-04, updated 2026-10-05 (inference script 0.0.3 adds a GeoJSON output, see step 15). This guide repeats, on any similar GPU server, what we did on the Maahr **g13** node: build the OLMO_opencl trainer, import the Sharjah wheat dataset, train the wheat-segmentation head on a frozen OlmoEarth-v1-Tiny encoder, and produce wheat maps.
 
 All the scripts and input files are in the `scripts` folder next to this document. The guide refers to them by path (`scripts/...`) instead of pasting them, so the steps stay short.
 
@@ -8,7 +8,7 @@ All the scripts and input files are in the `scripts` folder next to this documen
 
 ## 0. What you get, what you need, how long it takes
 
-**The result:** a trained checkpoint (`.ckpt`) and six PNG maps plus a CSV table with one row per wheat field (active area, credit score, insurable area). On g13 the validation F1 score came out at **0.77**.
+**The result:** a trained checkpoint (`.ckpt`) and six PNG maps plus a CSV table with one row per wheat field (active area, credit score, insurable area). Since inference script 0.0.3 the same table is also written as a GeoJSON with the field polygons, so GIS tools can draw every theme without a join. On g13 the validation F1 score came out at **0.77**.
 
 **What you need**
 - A Linux GPU server you can log in to with SSH. No `sudo` is needed. The scripts install everything inside your home folder.
@@ -35,7 +35,9 @@ All the scripts and input files are in the `scripts` folder next to this documen
 | `scripts/inputs/make_inputs_bundle.sh` | rebuilds `olmo_inputs.tgz` from the two folders above |
 | `scripts/reference_run/` | small text-only copy of three log files of our g13 run (`run_config.json`, `run_log.jsonl`, `train.log`); the same files are also inside `g13_run/` |
 | `g13_run/trainer_checkpoints/` | **the results of our training run on g13**: the checkpoints `epoch=12-step=754`, `epoch=13-step=812` (best), `epoch=14-step=870` and `last` (each as `.ckpt`, the Lightning file the inference script loads, and `.head`, the trainer's own small file), plus `run_config.json`, `run_log.jsonl` and `train.log` |
-| `g13_inference/` | **the results of our inference run on g13**: the six PNG maps `01_...` to `06_...`, `field_stats.csv` and the QGIS raster `result_epsg32640_0.tif` |
+| `g13_inference/` | **the results of our first inference run on g13** (2026-10-04, script 0.0.2): the six PNG maps `01_...` to `06_...`, `field_stats.csv` and the QGIS raster `result_epsg32640_0.tif` (no GeoJSON yet) |
+| `g13_inference_20261005/` | **the results of our second inference run** (2026-10-05, script 0.0.3): the same eight files, byte for byte, plus the new `field_stats.geojson` |
+| `scripts/patches/` | Dr. Yann's patch that adds the GeoJSON (`ALMA_inference_geojson_2026-10-04.diff`) and his changelog for it |
 
 ---
 
@@ -285,6 +287,34 @@ A second run on the same folder is refused unless you set `OVERWRITE=1` in front
 
 ## 15. Stage `infer`: wheat maps and the field table
 
+### 15a. First apply Dr. Yann's 0.0.3 patch (adds `field_stats.geojson`)
+
+The inference script in `olmo_inputs.tgz` is version 0.0.2 and writes no GeoJSON. Dr. Yann's patch (`scripts/patches/ALMA_inference_geojson_2026-10-04.diff`, his notes are in `scripts/patches/CHANGELOG_ALMA_Inference_0.0.3_from_Dr_Yann.md`) changes the script to 0.0.3: it adds a block that writes `field_stats.geojson` next to the CSV. The CSV, the six PNGs and the inference itself do not change.
+
+**g13 has no `patch` command**, so patch the script in WSL on your laptop (VPN up) and copy it back. Run this after the `tools` stage, and before `infer`:
+
+```bash
+mkdir -p ~/g13patch && cd ~/g13patch
+scp <user>@<server>:~/dev/olmoearth_projects/ALMA_Inference_Wheat_Festival.sh .
+cp ALMA_Inference_Wheat_Festival.sh before.sh
+
+# keep only the .sh part of the diff (its first 39 lines; the .md part starts at line 40)
+head -39 <path-to-this-repo>/scripts/patches/ALMA_inference_geojson_2026-10-04.diff > sh.diff
+
+patch --dry-run ALMA_Inference_Wheat_Festival.sh < sh.diff     # all hunks must say "succeeded"
+patch ALMA_Inference_Wheat_Festival.sh < sh.diff
+bash -n ALMA_Inference_Wheat_Festival.sh && echo "syntax ok"
+grep -n 'ALMA_INFER_VERSION=\|field_stats.geojson' ALMA_Inference_Wheat_Festival.sh
+diff before.sh ALMA_Inference_Wheat_Festival.sh
+
+scp ALMA_Inference_Wheat_Festival.sh <user>@<server>:~/dev/olmoearth_projects/
+ssh <user>@<server> 'chmod 755 ~/dev/olmoearth_projects/ALMA_Inference_Wheat_Festival.sh'
+```
+
+You should see version `0.0.3` and an added block of about eight lines in the diff. The `.md` part of Dr. Yann's diff is documentation for a file that is not in the repository on the server, so it is skipped on purpose. The patch does not touch the hard-coded `CHECKPOINT=` line, so it also applies after the `infer` stage has set the checkpoint. `~/g13_setup.sh infer` copies the script only if it is missing (`cp -n`), so it will not overwrite your patched version.
+
+### 15b. Run the stage
+
 ```bash
 GPU=1 ~/g13_setup.sh bg infer
 tail -f ~/g13_infer.log
@@ -311,9 +341,48 @@ The script downloads the imagery for the whole Meilha area, runs the model and d
 | `05_credit_score.png` | same | micro-credit score per field, 0 to 100 |
 | `06_insurance_exposure.png` | same | insurable active area per field, in hectares |
 | `field_stats.csv` | same | one row per field, for Excel or a dashboard |
+| `field_stats.geojson` | same | the same table as properties of the 37 field polygons (script 0.0.3 or later), see 15c |
 | `result_epsg32640_0.tif` | `~/RSDATA/alma_wheat_festival/results/results_raster/` | the prediction raster for QGIS (UTM zone 40N) |
 
-The same eight files from our own g13 run are in the folder `g13_inference/` of this guide. Open them to see what a good run looks like before you start your own.
+The files from our own g13 runs are in the folders `g13_inference/` (first run, eight files) and `g13_inference_20261005/` (second run with script 0.0.3, nine files including the GeoJSON). Open them to see what a good run looks like before you start your own. The second run reproduced the first one exactly: the six PNGs, the CSV and the raster have identical checksums, so the patch changed only the new GeoJSON.
+
+On 2026-10-05 the end of the log read: season 2024-11-01 to 2025-04-30, total active wheat **1179.4 ha**, **34 of 37** fields active, mean credit score **84 / 100**, no fields flagged.
+
+### 15c. What is in `field_stats.geojson`
+
+One feature per field (37), polygons in EPSG:4326 (stored as longitude/latitude, `CRS84`, as MultiPolygons), with the same figures as the CSV as properties. We compared the file with the CSV: all nine properties match exactly. Statuses in the 2026-10-05 run: 34 `active`, 2 `partial`, 1 `inactive`.
+
+| Property | Theme / map |
+|---|---|
+| `field_id` | 1-based row order of `Sharjah_Wheat_fields_4326.geojson` |
+| `diam_km` | field diameter, copied from the boundary file |
+| `status` | 03 field activation (`active` / `partial` / `inactive`) |
+| `active_frac`, `mean_prob` | 03 field activation, 05 credit score |
+| `uncertainty_frac` | 04 uncertainty (share of pixels at 0.30 to 0.70) |
+| `area_ha`, `active_area_ha` | 06 insurance exposure |
+| `credit_score` | 05 credit score (0 to 100) |
+
+So one GeoJSON file carries the data of four maps (03 to 06); you get each map by colouring the polygons by a different property. Maps 01 (wheat probability) and 02 (wheat mask) are drawn from the probability raster `result_epsg32640_0.tif`, not from the GeoJSON.
+
+**Caution:** `field_id` is the position of a field in `Sharjah_Wheat_fields_4326.geojson`, not an ID stored in that file. If the boundary file is reordered or edited, the IDs of a new run no longer match earlier runs. The GeoJSON carries its own polygons, so it is not affected; joins of the CSV to the boundary file are.
+
+### 15d. If `g13_setup.sh` only prints its help text instead of running `infer`
+
+The copy of `g13_setup.sh` on the server may be older than `scripts/g13_setup.sh` in this repository and have no `infer` stage; it then prints its usage text and stops, and `~/g13_infer.log` contains only that text. Either send the current `scripts/g13_setup.sh` again, or run the inference script directly (this is what the stage does; the checkpoint path is already set in the script):
+
+```bash
+cd ~/dev/olmoearth_projects
+export PATH="$HOME/.local/bin:$PATH" WANDB_MODE=disabled
+SCRATCH=$HOME/RSDATA/alma_wheat_festival
+ls -lh "$SCRATCH/trainer_checkpoints/"*.ckpt                      # the CHECKPOINT= line in the script must point at one of these
+.venv/bin/python -c "import mlflow" 2>/dev/null || uv pip install --python .venv/bin/python mlflow
+[ -d "$SCRATCH/dataset_0" ] && mv "$SCRATCH/dataset_0" "$SCRATCH/dataset_0.old_$(date +%H%M%S)"
+CUDA_VISIBLE_DEVICES=1 nohup bash ALMA_Inference_Wheat_Festival.sh 2024-11-01 2025-04-30 "$SCRATCH" \
+  < /dev/null > ~/g13_infer.log 2>&1 &
+tail -f ~/g13_infer.log
+```
+
+On g13 this ran in a few minutes, because the imagery was already cached (`computed 0 ingest jobs`). The log starts with `ALMA_Inference_Wheat_Festival.sh v0.0.3` when the patch is in place, and near the end shows `Wrote field_stats.csv` followed by `Wrote field_stats.geojson`.
 
 ---
 
@@ -334,6 +403,25 @@ Open `result_epsg32640_0.tif` in QGIS and put `scripts/inputs/Sharjah_Wheat_fiel
 
 Keep the checkpoints and `run_config.json` together with the results. The `.ckpt` file loads with the unchanged `ALMA_Inference_Wheat_Festival.sh`.
 
+### 16b. Show the six maps in QGIS
+
+1. Drag `field_stats.geojson` into QGIS (or Layer > Add Layer > Add Vector Layer). Check the attribute table: 37 rows and nine properties.
+2. Add a basemap (XYZ Tiles) and, for maps 01 and 02, the raster `result_epsg32640_0.tif` (UTM 40N; QGIS reprojects it on the fly). Keep the field layer above the raster.
+3. Colour the field layer under Layer Properties > Symbology, one copy of the layer per map (right-click > Duplicate Layer):
+
+| Map | Property | Style |
+|---|---|---|
+| 03 Field activation | `status` | Categorized: active green, partial amber, inactive red |
+| 04 Uncertainty | `uncertainty_frac` | Graduated, sequential ramp (yellow to dark red) |
+| 05 Credit score | `credit_score` | Graduated, fixed range 0 to 100, five bands, red to green |
+| 06 Insurance exposure | `active_area_ha` | Graduated, sequential ramp, hectares |
+
+4. Maps 01 and 02 come from the raster (one band, values 0.0 to 1.0, the wheat probability). Style 01 as Singleband pseudocolor from 0 to 1 in the tan-to-green wheat colours, and 02 as two classes split at a probability cutoff. We used 0.5 for the cutoff, which is an assumption: compare with `02_wheat_mask.png` and the inference script before relying on it.
+5. Untick the field layers above a raster layer when you want to see it (the polygons are mostly opaque), and tick them again for maps 03 to 06.
+6. For a printable map use Project > New Print Layout and export an image or PDF. The finished PNGs from the script are already in the results folders.
+
+Dr. Yann's own map viewer (sharjah.almamaps.ai) can use the same GeoJSON for the fields of Mleiha.
+
 ---
 
 ## 17. How good is the result, and what to watch
@@ -341,6 +429,7 @@ Keep the checkpoints and `run_config.json` together with the results. The `.ckpt
 - **Validation F1 about 0.77** with the best epoch at 12 to 14. The score stays flat after that, so more epochs with the same setup do not help.
 - **Over-prediction of wheat.** Recall is high (about 0.95) but precision is lower (about 0.65): the model marks too many pixels as wheat. Treat the maps as a first result.
 - **Small validation set.** Eight validation windows make the score noisy. The test split (8 windows) was not scored by a separate command here; it is only used as fixed crops for the golden comparison.
+- **The inference run is reproducible.** Running the inference twice (2026-10-04 with script 0.0.2, 2026-10-05 with 0.0.3) gave identical PNGs, CSV and raster. Only the GeoJSON is new.
 - **The training run is fast and cheap.** Because the encoder is frozen, its features are computed once and the head trains in seconds per epoch. Experiments (other seeds, learning rates, `augment=1`) are practical; use `OLMO_CL_EXTRA="..."` on the training script or edit the `train` stage.
 
 ---
@@ -359,6 +448,9 @@ Keep the checkpoints and `run_config.json` together with the results. The `.ckpt
 | Link error mentioning `GCC_12.0.0` symbols | The `gdal` stage was not run, or `OpenCL.pc` lacks the `libgcc_s.so.1` entry. Re-run `~/g13_setup.sh gdal` and `build`. |
 | The training script waits at "Continue anyway with DEVICE=auto" | Its OpenCL self-test failed on the chosen device. Fix the device first (run `~/g13_setup.sh build` and read the error). |
 | `ModuleNotFoundError: mlflow` in inference | The `infer` stage installs it; run it through the script. |
+| `patch: command not found` on the server | The server has no `patch`. Patch the script in WSL and copy it back (step 15a). |
+| `~/g13_infer.log` contains only the script's help text | The `g13_setup.sh` on the server has no `infer` stage. Send the current one, or run the inference script directly (step 15d). |
+| Only eight output files, no `field_stats.geojson` | The inference script is still version 0.0.2. Apply the patch (step 15a); the log's first line must show `v0.0.3`. |
 
 ---
 

@@ -12,9 +12,13 @@ The model is a small trainable head on top of a frozen pretrained **OlmoEarth-v1
 | Training | 80 epochs, about 4 s per epoch, about 6 minutes in total on one A100 |
 | Best checkpoint | `epoch=13-step=812.ckpt`, validation F1 **0.7748** |
 | Behaviour | high recall (about 0.95), lower precision (about 0.65): the model over-predicts wheat |
-| Outputs | six PNG maps, `field_stats.csv`, and a GeoTIFF for QGIS |
+| Outputs | six PNG maps, `field_stats.csv`, `field_stats.geojson` (inference script 0.0.3) and a GeoTIFF for QGIS |
 
 Treat the numbers as a first result: the validation set is small, and the test split was not scored separately.
+
+### Update 2026-10-05: GeoJSON output (inference script 0.0.3)
+
+Dr. Yann's patch (`scripts/patches/`) makes `ALMA_Inference_Wheat_Festival.sh` also write `field_stats.geojson`: one feature per field (37), with the field polygon in EPSG:4326 and the same nine per-field figures as the CSV as properties. GIS tools and map dashboards can then draw maps 03 to 06 directly (`status`, `uncertainty_frac`, `credit_score`, `active_area_ha`) without joining the CSV to the boundary file; maps 01 and 02 still come from the probability raster. We applied the patch on g13 and re-ran the inference: 1179.4 ha active wheat, 34 of 37 fields active, mean credit score 84. The PNGs, the CSV and the raster are identical to the first run; only the GeoJSON is new. The results are in `g13_inference_20261005/`. See steps 15a to 15d and 16b of the guide (the server has no `patch` command, so the script is patched in WSL and copied back).
 
 ## Start here
 
@@ -52,7 +56,9 @@ GPU=1 ~/g13_setup.sh bg infer
 | `scripts/inputs/` | `olmo_inputs.tgz` (the bundle sent to the server), readable copies of `OLMO_opencl/` and `Olmoearth-retraining-for-wheat-field/`, the field polygons `Sharjah_Wheat_fields_4326.geojson`, and `make_inputs_bundle.sh` |
 | `scripts/reference_run/` | the three small log files of the reference run |
 | `g13_run/trainer_checkpoints/` | results of the reference training run: checkpoints (`.ckpt`, `.head`), `run_config.json`, `run_log.jsonl`, `train.log` |
-| `g13_inference/` | results of the reference inference run: six PNG maps, `field_stats.csv`, `result_epsg32640_0.tif` |
+| `g13_inference/` | results of the first inference run (script 0.0.2): six PNG maps, `field_stats.csv`, `result_epsg32640_0.tif` |
+| `g13_inference_20261005/` | results of the second inference run (script 0.0.3): the same files plus `field_stats.geojson` |
+| `scripts/patches/` | Dr. Yann's patch adding the GeoJSON output (`.diff`) and his changelog |
 
 ## Requirements
 
@@ -63,7 +69,7 @@ GPU=1 ~/g13_setup.sh bg infer
 ## Credits and licences
 
 - **OlmoEarth** and the `olmoearth_projects` / `rslearn` tooling are from Ai2 (Allen Institute for AI). The scripts download them at setup time; they are not stored here.
-- **OLMO_opencl** (the C + OpenCL trainer) and the `ALMA_*.sh` import, training and inference scripts are by Dr. Yann (ALMA). They are copied under `scripts/inputs/` unchanged. `OLMO_opencl` carries its own `LICENSE` file.
+- **OLMO_opencl** (the C + OpenCL trainer) and the `ALMA_*.sh` import, training and inference scripts are by Dr. Yann (ALMA). They are copied under `scripts/inputs/` unchanged (the 0.0.3 inference patch is kept separately in `scripts/patches/`; the bundle still holds version 0.0.2). `OLMO_opencl` carries its own `LICENSE` file.
 - The setup script, the VPN workflow and the guide were written for the ALMA EARTH Sharjah wheat project.
 - No licence has been chosen for the new material in this repository (the setup script, the guide and the VPN files). Add a `LICENSE` file before making the repository public.
 
