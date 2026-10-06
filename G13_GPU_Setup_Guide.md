@@ -342,9 +342,12 @@ The script downloads the imagery for the whole Meilha area, runs the model and d
 | `06_insurance_exposure.png` | same | insurable active area per field, in hectares |
 | `field_stats.csv` | same | one row per field, for Excel or a dashboard |
 | `field_stats.geojson` | same | the same table as properties of the 37 field polygons (script 0.0.3 or later), see 15c |
+| `threshold_sweep.csv` | same | active hectares and field counts at cut-offs 0.10 to 0.90 (script 0.0.4), see 15e |
+| `wheat_probability_epsg32640.tif` | same | copy of the probability raster, next to the tables (script 0.0.4) |
+| `run_manifest.json`, `provenance/` | same | what produced the run: checkpoint, configs, imagery list, checksums (script 0.0.4) |
 | `result_epsg32640_0.tif` | `~/RSDATA/alma_wheat_festival/results/results_raster/` | the prediction raster for QGIS (UTM zone 40N) |
 
-The files from our own g13 runs are in the folders `g13_inference/` (first run, eight files) and `g13_inference_20261005/` (second run with script 0.0.3, nine files including the GeoJSON). Open them to see what a good run looks like before you start your own. The second run reproduced the first one exactly: the six PNGs, the CSV and the raster have identical checksums, so the patch changed only the new GeoJSON.
+The files from our own g13 runs are in the folders `g13_inference/` (first run, eight files), `g13_inference_20261005/` (second run with script 0.0.3, nine files including the GeoJSON) and `g13_inference_20261006/` (third run with script 0.0.4: real probabilities, see 15e). Open them to see what a good run looks like before you start your own. The second run reproduced the first one exactly: the six PNGs, the CSV and the raster have identical checksums, so the patch changed only the new GeoJSON.
 
 On 2026-10-05 the end of the log read: season 2024-11-01 to 2025-04-30, total active wheat **1179.4 ha**, **34 of 37** fields active, mean credit score **84 / 100**, no fields flagged.
 
@@ -384,6 +387,61 @@ tail -f ~/g13_infer.log
 
 On g13 this ran in a few minutes, because the imagery was already cached (`computed 0 ingest jobs`). The log starts with `ALMA_Inference_Wheat_Festival.sh v0.0.3` when the patch is in place, and near the end shows `Wrote field_stats.csv` followed by `Wrote field_stats.geojson`.
 
+### 15e. Probability output instead of 0/1 (script 0.0.4, 2026-10-06)
+
+**The problem.** Up to script 0.0.3 the raster held class labels, 0 or 1, not probabilities. The model's task (`SegmentationTask` in rslearn) writes the `argmax` of the two classes by default. So every field had `mean_prob` equal to `active_frac`, `uncertainty_frac` was 0 everywhere, and map 01 ("probability") was really the mask. This was task A of Shakil's plan for 6 October ("`active_frac` ≠ `mean_prob` in most rows; `uncertainty_frac` > 0 somewhere"), and Dr. Yann asked for probabilities, a user-chosen cut-off (slider) and results that stay reproducible for insurers over ten years.
+
+**The fix needs no retraining.** The checkpoint is unchanged; only what the task writes changes.
+
+- Newer rslearn has `output_probs: true` / `output_class_idx: 1` for this, but **the rslearn on g13 is too old** (the check below prints `False`). So we added a small task class, `alma_tasks.WheatProbSegmentationTask` (file `alma_tasks.py`). It returns the wheat probability (one float32 band, 0 to 1) and works with any rslearn version. `model.yaml` names it as the `class_path` of the `wheat_seg` task.
+- The inference script became version **0.0.4** (Dr. Yann's 0.0.3 plus our changes): cut-off as a parameter `THRESH` (default 0.50) and the uncertain band as `UNC_LO`/`UNC_HI` (0.30/0.70); it stops with an error if the raster still holds only 0/1; it ignores nodata pixels; each field gets `prob_hist` (20 bins of 0.05, the share of its pixels in each band) and `threshold`, so a viewer with a slider can recompute area and status at any cut-off without the raster; it writes `threshold_sweep.csv`, a copy of the probability GeoTIFF, and `run_manifest.json` plus `provenance/` (checkpoint and boundary-file SHA-256, `model.yaml`, `alma_tasks.py`, `run_config.json`, the Sentinel-2 scene lists, SHA-256 of every output). It also fixes a latent crash in map 04 (`marker="!"` is not a valid matplotlib marker; it was never reached while the uncertainty was always 0) and puts its own folder on `PYTHONPATH` so `alma_tasks` is found.
+
+All files are in `scripts/patches/2026-10-06_probability_output/`: `alma_tasks.py`, `patch_model_yaml_prob_task.py`, `ALMA_Inference_Wheat_Festival.sh` (0.0.4), `ALMA_inference_probability_0.0.4.diff` (changes from 0.0.3) and `RUN_ON_G13.md` (the full command list). The `infer` stage of `g13_setup.sh` does **not** apply this patch; do it by hand as below.
+
+**Steps** (WSL with the VPN up, then on the server):
+
+```bash
+# WSL: send the files
+P=<path-to-this-repo>/scripts/patches/2026-10-06_probability_output
+ssh <user>@<server> mkdir -p dev/olmoearth_projects/incoming_v004
+scp $P/ALMA_Inference_Wheat_Festival.sh $P/alma_tasks.py $P/patch_model_yaml_prob_task.py \
+    <user>@<server>:dev/olmoearth_projects/incoming_v004/
+
+# server: install, keeping the old script and the same checkpoint as before
+cd ~/dev/olmoearth_projects
+grep -n '^CHECKPOINT=' ALMA_Inference_Wheat_Festival.sh          # note the checkpoint
+cp ALMA_Inference_Wheat_Festival.sh ALMA_Inference_Wheat_Festival.sh.v003
+cp incoming_v004/ALMA_Inference_Wheat_Festival.sh incoming_v004/alma_tasks.py .
+sed -i "s#^CHECKPOINT=.*#CHECKPOINT=\"$HOME/RSDATA/alma_wheat_festival/trainer_checkpoints/epoch=13-step=812.ckpt\"#" ALMA_Inference_Wheat_Festival.sh
+.venv/bin/python incoming_v004/patch_model_yaml_prob_task.py olmoearth_run_data/wheat_festival/model.yaml   # "1 time(s)"
+PYTHONPATH=$PWD .venv/bin/python -c "import alma_tasks; print('alma_tasks ok')"
+
+# server: no old 0/1 prediction may be left in dataset_0 (imagery alone is fine to keep)
+S=~/RSDATA/alma_wheat_festival
+find $S/dataset_0 -path '*layers/output*' -name '*.tif' | head -3      # must print nothing, else move dataset_0 aside
+[ -d $S/results ] && mv $S/results $S/results.old_$(date +%H%M%S)
+CUDA_VISIBLE_DEVICES=1 THRESH=0.50 nohup bash ALMA_Inference_Wheat_Festival.sh \
+    2024-11-01 2025-04-30 $S < /dev/null > ~/g13_infer_v004.log 2>&1 &
+tail -f ~/g13_infer_v004.log
+```
+
+To see whether the server's rslearn has the built-in option: `.venv/bin/python -c "import inspect, rslearn.train.tasks.segmentation as s; print('output_probs' in inspect.signature(s.SegmentationTask.__init__).parameters)"`. On g13 it prints `False`, hence `alma_tasks.py`.
+
+**You should see** `ALMA_Inference_Wheat_Festival.sh v0.0.4` on the first line, `Raster: ... px strictly between 0 and 1` with a large number, and four new outputs. Then copy the date folder to the laptop with `scp -r` (it now contains the `provenance/` subfolder).
+
+**What happened on g13 (2026-10-06).**
+
+- First attempt: we added `output_probs` to `model.yaml` and set checkpoint epoch 12 by mistake. Stopped; the 5 Oct runs used `epoch=13-step=812.ckpt`. Second attempt with `alma_tasks.py` and epoch 13 succeeded in about 7 minutes (one scene, 14 Apr 2025 on tile 40RCN, needed download retries).
+- Task A is met: in all 37 rows `active_frac` ≠ `mean_prob`, and `uncertainty_frac` > 0 in all 37.
+- At cut-off 0.50 the areas and statuses are **identical** to 5 Oct (1179.4 ha, 34 active, 2 partial, 1 inactive). This is expected: with two classes, "argmax" is the same as "probability ≥ 0.5". It confirms the run is consistent with the earlier ones.
+- **The model is barely confident.** Wheat probabilities are squeezed around 0.5: maximum anywhere 0.682; inside the fields the median is 0.547 (5–95 %: 0.457–0.607), outside 0.449 (0.376–0.523). So 99.6 % of all pixels fall in the 0.30–0.70 "uncertain" band, **all 37 fields are flagged** (uncertainty 0.94–1.00) and the mean credit score drops from 84 to **56** (20 % of the score is 1 − uncertainty, which was always 1 before).
+- `threshold_sweep.csv` shows a cliff: 1433 ha (all field area) active from 0.10 to 0.40, 1383 ha at 0.45, 1179 at 0.50, 682 at 0.55, 110 at 0.60, 0 from 0.65. The choice of cut-off therefore decides the answer, and the 0.30/0.70 band does not suit this model.
+- About 48 km² **outside** the fields is above 0.50 (inside: 11.8 km²), which agrees with the low precision (about 0.65) of the validation scores.
+- Likely reason (not tested): the trained part is a small head on a frozen encoder, which separates wheat from background only weakly. Calibration (for example temperature scaling on the validation windows) or a better-trained model is needed before the probabilities can be read as "x % sure".
+- **Seams in the raster:** 4 rows and 4 columns of pixels are exactly 0.0 (where prediction tiles meet; visible as a cross on maps 01 and 04). 738 of these pixels (about 7.4 ha) lie in 8 fields (2, 9, 10, 18, 22, 30, 31, 35) and count as "not wheat". The same seams were in the 0/1 runs (value 0 = background), so the earlier results have them too. A real softmax probability is never exactly 0.0, so a later version can treat exact zeros as nodata.
+
+Decisions for Shakil and Dr. Yann before these numbers go on the MleihaEarth page: the cut-off, the uncertainty band (or calibration first), and how question 02 ("Are you sure?") is answered.
+
 ---
 
 ## 16. Copy the results to your laptop
@@ -416,7 +474,7 @@ Keep the checkpoints and `run_config.json` together with the results. The `.ckpt
 | 05 Credit score | `credit_score` | Graduated, fixed range 0 to 100, five bands, red to green |
 | 06 Insurance exposure | `active_area_ha` | Graduated, sequential ramp, hectares |
 
-4. Maps 01 and 02 come from the raster (one band, values 0.0 to 1.0, the wheat probability). Style 01 as Singleband pseudocolor from 0 to 1 in the tan-to-green wheat colours, and 02 as two classes split at a probability cutoff. We used 0.5 for the cutoff, which is an assumption: compare with `02_wheat_mask.png` and the inference script before relying on it.
+4. Maps 01 and 02 come from the raster (one band). Up to script 0.0.3 it holds only 0 and 1 (class labels); from 0.0.4 it holds the wheat probability 0.0 to 1.0 (`wheat_probability_epsg32640.tif` in the output folder). Style 01 as Singleband pseudocolor in the tan-to-green wheat colours (with 0.0.4 output, stretch it to about 0.35–0.70, the range the model actually uses), and 02 as two classes split at the cut-off of the run (`THRESH`, 0.50 by default; recorded in `run_manifest.json`).
 5. Untick the field layers above a raster layer when you want to see it (the polygons are mostly opaque), and tick them again for maps 03 to 06.
 6. For a printable map use Project > New Print Layout and export an image or PDF. The finished PNGs from the script are already in the results folders.
 
@@ -429,7 +487,8 @@ Dr. Yann's own map viewer (sharjah.almamaps.ai) can use the same GeoJSON for the
 - **Validation F1 about 0.77** with the best epoch at 12 to 14. The score stays flat after that, so more epochs with the same setup do not help.
 - **Over-prediction of wheat.** Recall is high (about 0.95) but precision is lower (about 0.65): the model marks too many pixels as wheat. Treat the maps as a first result.
 - **Small validation set.** Eight validation windows make the score noisy. The test split (8 windows) was not scored by a separate command here; it is only used as fixed crops for the golden comparison.
-- **The inference run is reproducible.** Running the inference twice (2026-10-04 with script 0.0.2, 2026-10-05 with 0.0.3) gave identical PNGs, CSV and raster. Only the GeoJSON is new.
+- **The inference run is reproducible.** Running the inference twice (2026-10-04 with script 0.0.2, 2026-10-05 with 0.0.3) gave identical PNGs, CSV and raster. Only the GeoJSON is new. The 0.0.4 run (2026-10-06) gave the same areas and statuses at cut-off 0.50.
+- **The probabilities are squeezed around 0.5** (maximum 0.682, see 15e). Every field is "uncertain" under the 0.30–0.70 band, and the area changes sharply between cut-offs 0.45 and 0.60. Calibrate or improve the model before quoting probabilities or a precision figure.
 - **The training run is fast and cheap.** Because the encoder is frozen, its features are computed once and the head trains in seconds per epoch. Experiments (other seeds, learning rates, `augment=1`) are practical; use `OLMO_CL_EXTRA="..."` on the training script or edit the `train` stage.
 
 ---
@@ -451,6 +510,12 @@ Dr. Yann's own map viewer (sharjah.almamaps.ai) can use the same GeoJSON for the
 | `patch: command not found` on the server | The server has no `patch`. Patch the script in WSL and copy it back (step 15a). |
 | `~/g13_infer.log` contains only the script's help text | The `g13_setup.sh` on the server has no `infer` stage. Send the current one, or run the inference script directly (step 15d). |
 | Only eight output files, no `field_stats.geojson` | The inference script is still version 0.0.2. Apply the patch (step 15a); the log's first line must show `v0.0.3`. |
+| `active_frac` equals `mean_prob` in every row, `uncertainty_frac` is 0 | The raster holds 0/1 class labels. Apply the probability patch (step 15e). |
+| `ERROR: the raster holds only 0/1 class labels` (script 0.0.4) | `model.yaml` does not name `alma_tasks.WheatProbSegmentationTask`, or `dataset_0` still holds an old 0/1 prediction. See 15e. |
+| The `output_probs` check prints `False` | The server's rslearn is too old for `output_probs`; use `alma_tasks.py` (15e). Do not put `output_probs` into `model.yaml`. |
+| `ModuleNotFoundError: alma_tasks` | `alma_tasks.py` must sit next to `ALMA_Inference_Wheat_Festival.sh` (0.0.4 adds that folder to `PYTHONPATH`). |
+| `Retrying after catching error ... timed out` during inference | Sentinel-2 download retries; wait. If the log stops for more than 20 minutes, stop and start the same command again: finished downloads are kept. |
+| All 37 fields flagged, credit scores near 56 (script 0.0.4) | Not a bug: the model's probabilities lie between about 0.35 and 0.70 (15e). The uncertainty band and cut-off need to be chosen for this model. |
 
 ---
 

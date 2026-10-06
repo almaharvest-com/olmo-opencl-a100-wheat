@@ -1,0 +1,358 @@
+--- v003.sh	2026-10-06 17:41:21.519312751 +0600
++++ ALMA_Inference_Wheat_Festival.sh	2026-10-06 18:49:27.583074909 +0600
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ # ALMA Wheat Festival — Inference + PNG Output Generation
+-ALMA_INFER_VERSION="0.0.3"; echo "ALMA_Inference_Wheat_Festival.sh v${ALMA_INFER_VERSION}"
++ALMA_INFER_VERSION="0.0.4"; echo "ALMA_Inference_Wheat_Festival.sh v${ALMA_INFER_VERSION}"
+ #
+ # Runs the trained OlmoEarth-Tiny model over the Meilha AOI and produces
+ # six PNG outputs for crop insurance, traceability, and micro-credit allocation.
+@@ -21,6 +21,18 @@
+ #   06_insurance_exposure.png — per-field insurable active area (ha)
+ #   field_stats.csv           — machine-readable per-field table
+ #   field_stats.geojson       — same table with the field polygons (EPSG:4326)
++#   wheat_probability_epsg32640.tif — the per-pixel wheat probability (0–1)
++#   threshold_sweep.csv       — total active ha / field counts at cut-offs 0.10–0.90
++#   run_manifest.json         — what produced this run (checkpoint, config,
++#                               imagery, checksums), for long-term reproducibility
++#
++# 0.0.4: the model now writes wheat PROBABILITY, not argmax 0/1: model.yaml
++# names  class_path: alma_tasks.WheatProbSegmentationTask  for wheat_seg
++# (alma_tasks.py sits next to this script; works with any rslearn version). The cut-off is a parameter:
++#   THRESH=0.50 UNC_LO=0.30 UNC_HI=0.70 bash ALMA_Inference_Wheat_Festival.sh ...
++# Each field also carries prob_hist: 20 bins of 0.05 = share of the field's
++# pixels in each probability band, so a viewer can recompute area and status
++# at any cut-off (threshold slider) without the raster.
+ #
+ # Executive rationale (inline):
+ #   Crop insurance, traceability and micro-credit all require a trusted,
+@@ -42,12 +54,16 @@
+ PROJECT_PATH="${REPO_DIR}/olmoearth_run_data/wheat_festival"
+ FIELDS_GEOJSON="${HOME}/GISDATA/Sharjah_WheatFestival/Sharjah_Wheat_fields_4326.geojson"
+ OUT_DATE=$(date +%Y%m%d)
++THRESH="${THRESH:-0.50}"     # wheat / not-wheat cut-off on the probability
++UNC_LO="${UNC_LO:-0.30}"     # uncertain band, lower edge
++UNC_HI="${UNC_HI:-0.70}"     # uncertain band, upper edge
+ OUT_DIR="${SCRATCH}/inference_outputs/${OUT_DATE}"
+ 
+ echo "=== ALMA Wheat Festival — Inference ==="
+ echo "  Season window : ${START_DATE} → ${END_DATE}"
+ echo "  Checkpoint    : ${CHECKPOINT}"
+ echo "  Output dir    : ${OUT_DIR}"
++echo "  Cut-off       : ${THRESH}   uncertain band: ${UNC_LO}–${UNC_HI}"
+ 
+ mkdir -p "${OUT_DIR}"
+ 
+@@ -66,6 +82,8 @@
+ fi
+ 
+ source "${REPO_DIR}/.venv/bin/activate"
++# alma_tasks.py (wheat probability task, used by model.yaml) sits next to this script
++export PYTHONPATH="${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+ 
+ python3 -c "import rasterio, geopandas, matplotlib, scipy, mlflow" 2>/dev/null || {
+     echo "ERROR: Missing dependencies. Run: uv add mlflow && pip install rasterio geopandas matplotlib scipy"
+@@ -168,6 +186,11 @@
+ START_DATE   = "${START_DATE}"
+ END_DATE     = "${END_DATE}"
+ 
++THRESH       = float("${THRESH}")
++UNC_LO       = float("${UNC_LO}")
++UNC_HI       = float("${UNC_HI}")
++N_BINS       = 20          # prob_hist bins of 0.05
++
+ DPI          = 150
+ FIG_W, FIG_H = 12, 9    # inches → 1800 × 1350 at 150 dpi
+ 
+@@ -177,17 +200,35 @@
+     logits   = src.read().astype(np.float32)   # (2, H, W)
+     transform = src.transform
+     crs       = src.crs
++    src_nodata = src.nodata
+     extent    = [src.bounds.left, src.bounds.right,
+                  src.bounds.bottom, src.bounds.top]  # for imshow
+ 
+-# Output is single-band float32 with values 0.0 (background) / 1.0 (wheat).
+-# The SegmentationHead saves argmax class predictions, not raw logits.
+-# Use band 0 directly — no softmax needed.
++# Since 0.0.4 the model writes the wheat probability (softmax of class 1),
++# one float32 band in 0–1. The old argmax output (0/1 only) made
++# active_frac == mean_prob and uncertainty_frac == 0, so refuse it.
++nodata = src_nodata
+ if logits.shape[0] == 2:
+     exp  = np.exp(logits - logits.max(axis=0, keepdims=True))
+     prob = (exp / exp.sum(axis=0, keepdims=True))[1]
+ else:
+-    prob = logits[0]   # already 0.0 / 1.0
++    prob = logits[0].copy()
++invalid = ~np.isfinite(prob) | (prob < 0) | (prob > 1)
++if nodata is not None:
++    invalid |= (prob == nodata)
++prob[invalid] = np.nan
++valid = prob[~np.isnan(prob)]
++if valid.size == 0:
++    raise SystemExit("ERROR: the result raster has no valid pixels")
++n_mid = int(((valid > 0.001) & (valid < 0.999)).sum())
++print(f"  Raster: {valid.size} valid px, {n_mid} px strictly between 0 and 1, "
++      f"min {valid.min():.3f} max {valid.max():.3f}")
++if n_mid == 0:
++    raise SystemExit(
++        "ERROR: the raster holds only 0/1 class labels, not probabilities.\n"
++        "  model.yaml must name  class_path: alma_tasks.WheatProbSegmentationTask\n"
++        "  for wheat_seg (see patch_model_yaml_prob_task.py), and dataset_0 must not\n"
++        "  hold an old 0/1 prediction. Fix and run the inference again.")
+ 
+ # Reproject field boundaries to raster CRS (UTM 40N)
+ print("  Loading field boundaries...")
+@@ -208,41 +249,37 @@
+ # ── Helper: field mask for one row ────────────────────────────────────────
+ from rasterio.features import geometry_mask
+ 
+-def field_prob_stats(geom, prob, transform, crs_obj):
+-    """Return (mean_prob, active_frac, area_ha, active_area_ha) for one field."""
+-    try:
+-        mask = ~geometry_mask(
+-            [mapping(geom)],
+-            transform=transform,
+-            out_shape=prob.shape,
+-            all_touched=False,
+-        )
+-        if mask.sum() == 0:
+-            return 0.0, 0.0, 0.0, 0.0
+-        px     = prob[mask]
+-        mean_p = float(px.mean())
+-        act_f  = float((px >= 0.50).sum() / len(px))
+-        pixel_area_m2 = abs(transform.a * transform.e)
+-        area_ha       = len(px) * pixel_area_m2 / 10_000
+-        active_ha     = (px >= 0.50).sum() * pixel_area_m2 / 10_000
+-        return mean_p, act_f, area_ha, active_ha
+-    except Exception:
+-        return 0.0, 0.0, 0.0, 0.0
++def field_pixels(geom):
++    """Probabilities of the valid pixels inside one field (1-D array)."""
++    mask = ~geometry_mask([mapping(geom)], transform=transform,
++                          out_shape=prob.shape, all_touched=False)
++    px = prob[mask]
++    return px[~np.isnan(px)]
++
++PIXEL_AREA_M2 = abs(transform.a * transform.e)
++
++def field_prob_stats(px):
++    """Return (mean_prob, active_frac, uncertainty_frac, area_ha, active_area_ha, prob_hist)."""
++    if px.size == 0:
++        return 0.0, 0.0, 0.0, 0.0, 0.0, [0.0] * N_BINS
++    mean_p    = float(px.mean())
++    n_act     = int((px >= THRESH).sum())
++    act_f     = n_act / px.size
++    unc_f     = float(((px >= UNC_LO) & (px <= UNC_HI)).sum() / px.size)
++    area_ha   = px.size * PIXEL_AREA_M2 / 10_000
++    active_ha = n_act * PIXEL_AREA_M2 / 10_000
++    counts, _ = np.histogram(px, bins=N_BINS, range=(0.0, 1.0))
++    hist      = [round(float(c) / px.size, 4) for c in counts]
++    return mean_p, act_f, unc_f, area_ha, active_ha, hist
+ 
+ # Compute per-field stats
+ print("  Computing per-field statistics...")
+ records = []
++field_px = {}
+ for fid, (_, row) in enumerate(fields.iterrows(), start=1):
+-    mean_p, act_f, area_ha, active_ha = field_prob_stats(
+-        row.geometry, prob, transform, crs
+-    )
+-    unc_frac = float(((prob >= 0.30) & (prob <= 0.70)
+-                       & np.array(~geometry_mask(
+-                           [mapping(row.geometry)],
+-                           transform=transform,
+-                           out_shape=prob.shape,
+-                           all_touched=False))).sum())
+-    unc_frac = unc_frac / max(1, area_ha * 10_000 / abs(transform.a * transform.e))
++    px = field_pixels(row.geometry)
++    mean_p, act_f, unc_frac, area_ha, active_ha, hist = field_prob_stats(px)
++    field_px[fid] = px
+ 
+     if act_f >= 0.60:
+         status = "active"
+@@ -272,6 +309,8 @@
+         "area_ha":        round(area_ha, 2),
+         "active_area_ha": round(active_ha, 2),
+         "credit_score":   credit,
++        "threshold":      THRESH,
++        "prob_hist":      hist,
+         "geometry":       row.geometry,
+     })
+ 
+@@ -282,17 +321,58 @@
+     w = csv.DictWriter(f, fieldnames=fieldnames)
+     w.writeheader()
+     for r in records:
+-        w.writerow({k: r[k] for k in fieldnames})
++        w.writerow({k: (" ".join(f"{v:.4f}" for v in r[k]) if k == "prob_hist" else r[k])
++                    for k in fieldnames})
+ print(f"  Wrote {csv_path.name}")
+ 
+ # ── Write GeoJSON ─────────────────────────────────────────────────────────
+ # Same per-field figures as the CSV, with the field polygons, so GIS tools
+ # and dashboards can map every theme without a join on field_id.
+ geojson_path = OUT_DIR / "field_stats.geojson"
+-gpd.GeoDataFrame(records, geometry="geometry", crs=crs).to_crs(4326).to_file(
+-    geojson_path, driver="GeoJSON")
++_g4326 = gpd.GeoSeries([r["geometry"] for r in records], crs=crs).to_crs(4326)
++_feats = []
++for r, g in zip(records, _g4326):
++    props = {k: v for k, v in r.items() if k != "geometry"}
++    _feats.append({"type": "Feature", "properties": props, "geometry": mapping(g)})
++_fc = {"type": "FeatureCollection",
++       "name": "field_stats",
++       "alma_run": {"script_version": "${ALMA_INFER_VERSION}",
++                    "threshold": THRESH, "uncertain_band": [UNC_LO, UNC_HI],
++                    "prob_hist_bins": [round(i / N_BINS, 2) for i in range(N_BINS + 1)],
++                    "season": [START_DATE, END_DATE]},
++       "features": _feats}
++geojson_path.write_text(json.dumps(_fc, default=float))
+ print(f"  Wrote {geojson_path.name}")
+ 
++# ── Threshold sweep ───────────────────────────────────────────────────────
++# How the headline numbers move with the cut-off: the basis for choosing it.
++sweep_path = OUT_DIR / "threshold_sweep.csv"
++with open(sweep_path, "w", newline="") as f:
++    w = csv.writer(f)
++    w.writerow(["threshold", "active_area_ha", "fields_active", "fields_partial", "fields_inactive"])
++    for t in np.round(np.arange(0.10, 0.91, 0.05), 2):
++        ha, na, npar, nin = 0.0, 0, 0, 0
++        for px in field_px.values():
++            if px.size == 0:
++                nin += 1
++                continue
++            n = int((px >= t).sum())
++            ha += n * PIXEL_AREA_M2 / 10_000
++            fr = n / px.size
++            if fr >= 0.60:
++                na += 1
++            elif fr >= 0.20:
++                npar += 1
++            else:
++                nin += 1
++        w.writerow([f"{t:.2f}", round(ha, 1), na, npar, nin])
++print(f"  Wrote {sweep_path.name}")
++
++# ── Probability raster copy, next to the tables ───────────────────────────
++import shutil
++shutil.copy2(RESULT_TIF, OUT_DIR / "wheat_probability_epsg32640.tif")
++print("  Wrote wheat_probability_epsg32640.tif")
++
+ # ── Colormaps ─────────────────────────────────────────────────────────────
+ wheat_cmap = LinearSegmentedColormap.from_list(
+     "wheat", ["#d4b483", "#f5e6a3", "#c8e89a", "#4fa847"])
+@@ -346,8 +426,8 @@
+ # underwriters and government statisticians require a yes/no classification
+ # per pixel, not a probability. This is the input to area calculations.
+ print("  02 binary wheat mask...")
+-mask_arr = (prob >= 0.50).astype(np.uint8)
+-fig, ax = base_fig(f"Wheat Mask (threshold 0.50)  |  {START_DATE} → {END_DATE}")
++mask_arr = (np.nan_to_num(prob, nan=0.0) >= THRESH).astype(np.uint8)
++fig, ax = base_fig(f"Wheat Mask (threshold {THRESH:.2f})  |  {START_DATE} → {END_DATE}")
+ mask_rgba = np.zeros((*mask_arr.shape, 4), dtype=np.float32)
+ mask_rgba[mask_arr == 1] = [0.24, 0.66, 0.20, 0.85]    # green wheat
+ mask_rgba[mask_arr == 0] = [0.60, 0.55, 0.40, 0.30]    # faint sand background
+@@ -363,7 +443,7 @@
+                 fontweight="bold",
+                 bbox=dict(boxstyle="round,pad=0.15", fc="#00000066", ec="none"))
+ patches = [
+-    mpatches.Patch(color="#3daa33", label="Wheat (≥ 0.50)"),
++    mpatches.Patch(color="#3daa33", label=f"Wheat (≥ {THRESH:.2f})"),
+     mpatches.Patch(color="#99887766", label="Background"),
+ ]
+ ax.legend(handles=patches, loc="lower right", fontsize=8,
+@@ -423,8 +503,8 @@
+ # fractions MUST be visited before credit or insurance decisions are finalised.
+ # This map operationalises the "human-in-the-loop" requirement.
+ print("  04 uncertainty...")
+-unc_mask = ((prob >= 0.30) & (prob <= 0.70)).astype(np.float32)
+-fig, ax = base_fig(f"Model Uncertainty  |  Uncertain pixels: 0.30 ≤ P ≤ 0.70")
++unc_mask = ((prob >= UNC_LO) & (prob <= UNC_HI)).astype(np.float32)   # NaN compares False
++fig, ax = base_fig(f"Model Uncertainty  |  Uncertain pixels: {UNC_LO:.2f} ≤ P ≤ {UNC_HI:.2f}")
+ # Base: dim probability
+ ax.imshow(prob, extent=extent, cmap=wheat_cmap, vmin=0, vmax=1,
+           origin="upper", alpha=0.35)
+@@ -441,10 +521,10 @@
+ for r in records:
+     if r["uncertainty_frac"] > 0.25:
+         c = r["geometry"].centroid
+-        ax.plot(c.x, c.y, marker="!", color="#ff4444", markersize=10, zorder=5)
++        ax.plot(c.x, c.y, marker="^", color="#ff4444", markersize=10, zorder=5)
+         ax.text(c.x, c.y + 200, f"⚠ {r['uncertainty_frac']:.0%}",
+                 color="#ff8888", fontsize=6, ha="center")
+-pct_unc = float((unc_mask.sum() / unc_mask.size) * 100)
++pct_unc = float((unc_mask.sum() / max(1, int(np.isfinite(prob).sum()))) * 100)
+ ax.set_title(f"{pct_unc:.1f} % of AOI pixels are uncertain  "
+              f"|  ⚠ = fields requiring physical verification",
+              color="#cccccc", fontsize=9, pad=4)
+@@ -545,7 +625,7 @@
+ # ── Summary ───────────────────────────────────────────────────────────────
+ print("")
+ print("  ┌─────────────────────────────────────────────┐")
+-print(f"  │  Season: {START_DATE} → {END_DATE}")
++print(f"  │  Season: {START_DATE} → {END_DATE}   cut-off {THRESH:.2f}")
+ print(f"  │  Total active wheat : {total_exp:.1f} ha")
+ print(f"  │  Active fields      : {sum(1 for r in records if r['status']=='active')} / {n_fields}")
+ print(f"  │  Mean credit score  : {np.mean(scores):.0f} / 100")
+@@ -554,6 +634,51 @@
+ PYEOF
+ 
+ # ---------------------------------------------------------------------------
++# 4b. Run manifest — what produced these numbers (insurers need the same
++#     answer from the same inputs years later)
++# ---------------------------------------------------------------------------
++mkdir -p "${OUT_DIR}/provenance"
++cp "${PROJECT_PATH}/model.yaml" "${PROJECT_PATH}/olmoearth_run.yaml" \
++   "${PROJECT_PATH}/dataset.json" "${PROJECT_PATH}/prediction_request_geometry.geojson" \
++   "${OUT_DIR}/provenance/" 2>/dev/null || true
++cp "$(dirname "${CHECKPOINT}")/run_config.json" "${OUT_DIR}/provenance/" 2>/dev/null || true
++cp "${REPO_DIR}/alma_tasks.py" "${OUT_DIR}/provenance/" 2>/dev/null || true
++# Sentinel-2 scenes actually used (rslearn writes items.json per window)
++find "${SCRATCH}" -path "*dataset_0*" -name items.json 2>/dev/null \
++  | tar czf "${OUT_DIR}/provenance/imagery_items.tgz" -T - 2>/dev/null || true
++
++python3 - << PYEOF2
++import hashlib, json, os, pathlib, platform, datetime
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++out = pathlib.Path("${OUT_DIR}")
++m = {
++  "script": "ALMA_Inference_Wheat_Festival.sh",
++  "script_version": "${ALMA_INFER_VERSION}",
++  "run_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
++  "host": platform.node(),
++  "season": ["${START_DATE}", "${END_DATE}"],
++  "threshold": float("${THRESH}"),
++  "uncertain_band": [float("${UNC_LO}"), float("${UNC_HI}")],
++  "checkpoint": {"path": "${CHECKPOINT}", "sha256": sha("${CHECKPOINT}")},
++  "fields_file": {"path": "${FIELDS_GEOJSON}", "sha256": sha("${FIELDS_GEOJSON}")},
++  "result_raster": {"path": "${RESULT_TIF}", "sha256": sha("${RESULT_TIF}")},
++  "outputs": {p.name: sha(p) for p in sorted(out.iterdir()) if p.is_file()},
++}
++try:
++    import rslearn, torch
++    m["versions"] = {"rslearn": getattr(rslearn, "__version__", "?"), "torch": torch.__version__}
++except Exception:
++    pass
++(out / "run_manifest.json").write_text(json.dumps(m, indent=2))
++print("  Wrote run_manifest.json")
++PYEOF2
++
++# ---------------------------------------------------------------------------
+ # 5. Final report
+ # ---------------------------------------------------------------------------
+ echo ""
+@@ -565,4 +690,6 @@
+ echo "  Load in QGIS: ${RESULT_TIF}"
+ echo "  Import CSV to dashboard: ${OUT_DIR}/field_stats.csv"
+ echo "  Per-field map layer   : ${OUT_DIR}/field_stats.geojson"
++echo "  Cut-off sweep         : ${OUT_DIR}/threshold_sweep.csv"
++echo "  Provenance            : ${OUT_DIR}/run_manifest.json  ${OUT_DIR}/provenance/"
+ echo "  View metrics: mlflow ui --backend-store-uri sqlite:////home/yann/RSDATA/alma_wheat_festival/alma_training.db"

@@ -12,13 +12,17 @@ The model is a small trainable head on top of a frozen pretrained **OlmoEarth-v1
 | Training | 80 epochs, about 4 s per epoch, about 6 minutes in total on one A100 |
 | Best checkpoint | `epoch=13-step=812.ckpt`, validation F1 **0.7748** |
 | Behaviour | high recall (about 0.95), lower precision (about 0.65): the model over-predicts wheat |
-| Outputs | six PNG maps, `field_stats.csv`, `field_stats.geojson` (inference script 0.0.3) and a GeoTIFF for QGIS |
+| Outputs | six PNG maps, `field_stats.csv`, `field_stats.geojson` (0.0.3), wheat-probability GeoTIFF, `threshold_sweep.csv` and run manifest (0.0.4) |
 
 Treat the numbers as a first result: the validation set is small, and the test split was not scored separately.
 
 ### Update 2026-10-05: GeoJSON output (inference script 0.0.3)
 
 Dr. Yann's patch (`scripts/patches/`) makes `ALMA_Inference_Wheat_Festival.sh` also write `field_stats.geojson`: one feature per field (37), with the field polygon in EPSG:4326 and the same nine per-field figures as the CSV as properties. GIS tools and map dashboards can then draw maps 03 to 06 directly (`status`, `uncertainty_frac`, `credit_score`, `active_area_ha`) without joining the CSV to the boundary file; maps 01 and 02 still come from the probability raster. We applied the patch on g13 and re-ran the inference: 1179.4 ha active wheat, 34 of 37 fields active, mean credit score 84. The PNGs, the CSV and the raster are identical to the first run; only the GeoJSON is new. The results are in `g13_inference_20261005/`. See steps 15a to 15d and 16b of the guide (the server has no `patch` command, so the script is patched in WSL and copied back).
+
+### Update 2026-10-06: real probabilities (inference script 0.0.4)
+
+Up to 0.0.3 the raster held 0/1 class labels, so `mean_prob` equalled `active_frac` and `uncertainty_frac` was always 0. The fix (`scripts/patches/2026-10-06_probability_output/`) needs no retraining: a small task class, `alma_tasks.py`, makes the model write the wheat probability (the g13 rslearn is too old for the built-in `output_probs` option), and script 0.0.4 adds a cut-off parameter (`THRESH`), per-field probability histograms for a threshold slider, `threshold_sweep.csv` and a run manifest with checksums and the imagery used. At cut-off 0.50 the result equals the earlier runs (1179.4 ha, 34 of 37 active), but the probabilities are squeezed around 0.5 (maximum 0.682), so all 37 fields fall in the 0.30–0.70 uncertainty band and the mean credit score is 56. The cut-off and the uncertainty band must be chosen, or the model calibrated, before these figures are published. Results in `g13_inference_20261006/`; details and commands in section 15e of the guide.
 
 ## Start here
 
@@ -58,7 +62,8 @@ GPU=1 ~/g13_setup.sh bg infer
 | `g13_run/trainer_checkpoints/` | results of the reference training run: checkpoints (`.ckpt`, `.head`), `run_config.json`, `run_log.jsonl`, `train.log` |
 | `g13_inference/` | results of the first inference run (script 0.0.2): six PNG maps, `field_stats.csv`, `result_epsg32640_0.tif` |
 | `g13_inference_20261005/` | results of the second inference run (script 0.0.3): the same files plus `field_stats.geojson` |
-| `scripts/patches/` | Dr. Yann's patch adding the GeoJSON output (`.diff`) and his changelog |
+| `g13_inference_20261006/` | results of the third inference run (script 0.0.4): wheat probabilities, `threshold_sweep.csv`, probability GeoTIFF, `run_manifest.json`, `provenance/` |
+| `scripts/patches/` | Dr. Yann's patch adding the GeoJSON output (`.diff`) and his changelog; `2026-10-06_probability_output/` with the probability fix (script 0.0.4, `alma_tasks.py`, `RUN_ON_G13.md`) |
 
 ## Requirements
 

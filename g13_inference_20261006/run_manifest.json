@@ -1,0 +1,43 @@
+{
+  "script": "ALMA_Inference_Wheat_Festival.sh",
+  "script_version": "0.0.4",
+  "run_utc": "2026-10-06T13:03:25+00:00",
+  "host": "g13",
+  "season": [
+    "2024-11-01",
+    "2025-04-30"
+  ],
+  "threshold": 0.5,
+  "uncertain_band": [
+    0.3,
+    0.7
+  ],
+  "checkpoint": {
+    "path": "/maahr/home/almauser1/RSDATA/alma_wheat_festival/trainer_checkpoints/epoch=13-step=812.ckpt",
+    "sha256": "8518d01a4924843cac1f0d8bc2b6ca9467c9c7dd6c05bf65b27dc8037e56d577"
+  },
+  "fields_file": {
+    "path": "/maahr/home/almauser1/GISDATA/Sharjah_WheatFestival/Sharjah_Wheat_fields_4326.geojson",
+    "sha256": "ba1051de646e9bb98b1725ee72f58703b615738790d09e971324b3b843a9e26b"
+  },
+  "result_raster": {
+    "path": "/maahr/home/almauser1/RSDATA/alma_wheat_festival/results/results_raster/result_epsg32640_0.tif",
+    "sha256": "4ef0a67b1d78a4a11b743d108380522965a70e313aa5816cd0915995b1cab768"
+  },
+  "outputs": {
+    "01_wheat_probability.png": "8b5147c62d61396f04ef0cf6266c2e6108fea381092fb66f608c5d3780ecf441",
+    "02_wheat_mask.png": "16d12c81be75e74c16de657954bfe6f692d5a58881542f426f7596923b7369f2",
+    "03_field_activation.png": "1d08edba394bb4516b30e42bd82e0bec032cd4d5e8737374ec220bdf2cca2ebe",
+    "04_uncertainty.png": "730c5ec3ac5e6c1c6efec299dc99c1423f85ac2264540935d3ee8e40592b7399",
+    "05_credit_score.png": "0040e2ea6fe09b09428dda7756b3c509ca6a86455e80247d2e2e1b3b5cd777a5",
+    "06_insurance_exposure.png": "29ec5178254528c36880799da1cdb02268fd476f7e29adfbb491dd243a545b2e",
+    "field_stats.csv": "d449102f17e80d25cd6cd4a6b4ad69f8ace3946aae5fdaf70a337c6bc3a43943",
+    "field_stats.geojson": "892790ef25f74e292385f0183b2f20567180571337ae46cb0b693e7fdcd2ff85",
+    "threshold_sweep.csv": "4b240b2a6a121cb8d2af02883923ed7a61cc161f8dbea58b549a2f8bbba09326",
+    "wheat_probability_epsg32640.tif": "4ef0a67b1d78a4a11b743d108380522965a70e313aa5816cd0915995b1cab768"
+  },
+  "versions": {
+    "rslearn": "?",
+    "torch": "2.7.1+cu126"
+  }
+}
