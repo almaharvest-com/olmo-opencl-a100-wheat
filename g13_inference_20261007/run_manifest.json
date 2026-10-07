@@ -1,0 +1,51 @@
+{
+  "script": "ALMA_Inference_Wheat_Festival.sh",
+  "script_version": "0.0.5",
+  "run_utc": "2026-10-07T08:00:42+00:00",
+  "host": "g13",
+  "season": [
+    "2024-11-01",
+    "2025-04-30"
+  ],
+  "threshold": 0.5,
+  "checkpoint": {
+    "path": "/maahr/home/almauser1/RSDATA/alma_wheat_festival/trainer_checkpoints/epoch=13-step=812.ckpt",
+    "sha256": "8518d01a4924843cac1f0d8bc2b6ca9467c9c7dd6c05bf65b27dc8037e56d577"
+  },
+  "fields_file": {
+    "path": "/maahr/home/almauser1/GISDATA/Sharjah_WheatFestival/Sharjah_Wheat_fields_4326.geojson",
+    "sha256": "ba1051de646e9bb98b1725ee72f58703b615738790d09e971324b3b843a9e26b"
+  },
+  "result_raster": {
+    "path": "/maahr/home/almauser1/RSDATA/alma_wheat_festival/results/results_raster/result_epsg32640_0.tif",
+    "sha256": "4ef0a67b1d78a4a11b743d108380522965a70e313aa5816cd0915995b1cab768"
+  },
+  "outputs": {
+    "01_wheat_probability.png": "5ea29e2bc7232f4038cdb1a9468a48ef104cf971b4d4122317e8aa835441c273",
+    "02_wheat_mask.png": "16d12c81be75e74c16de657954bfe6f692d5a58881542f426f7596923b7369f2",
+    "03_field_activation.png": "1d08edba394bb4516b30e42bd82e0bec032cd4d5e8737374ec220bdf2cca2ebe",
+    "04_uncertainty.png": "2dbde9b931eb36281f5f7ee64601dbdbd9dcc6bd7961658a499794e686ffeb28",
+    "05_credit_score.png": "00feeccd582789be62fea1aa3d693260e48f02d8998cb7357ffe2172e0ce9771",
+    "06_insurance_exposure.png": "29ec5178254528c36880799da1cdb02268fd476f7e29adfbb491dd243a545b2e",
+    "field_stats.csv": "dba7cdbe58629436525a5d0fb52c7dddc3e49daeda3c666d0560456b8230cec7",
+    "field_stats.geojson": "6df57bf66c81a1f5c1eb94329f71d850f8608b9ef28535dae37ae8a472278913",
+    "run_params.json": "960ef9a6cbe61b53d2bbc9f7a63096c0a679959775ecf151fd20fdac4cec8587",
+    "threshold_sweep.csv": "4b240b2a6a121cb8d2af02883923ed7a61cc161f8dbea58b549a2f8bbba09326",
+    "wheat_probability_epsg32640.tif": "4ef0a67b1d78a4a11b743d108380522965a70e313aa5816cd0915995b1cab768"
+  },
+  "versions": {
+    "rslearn": "?",
+    "torch": "2.7.1+cu126"
+  },
+  "uncertain_method": "otsu",
+  "uncertain_band": [
+    0.43,
+    0.4919
+  ],
+  "otsu_threshold": 0.4577,
+  "otsu_3class_thresholds": [
+    0.43,
+    0.4919
+  ],
+  "seam_pixels_set_nodata": 16368
+}

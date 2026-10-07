@@ -1,0 +1,156 @@
+--- v004.sh	2026-10-07 12:31:16.088205460 +0600
++++ ALMA_Inference_Wheat_Festival.sh	2026-10-07 12:31:16.100749716 +0600
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ # ALMA Wheat Festival — Inference + PNG Output Generation
+-ALMA_INFER_VERSION="0.0.4"; echo "ALMA_Inference_Wheat_Festival.sh v${ALMA_INFER_VERSION}"
++ALMA_INFER_VERSION="0.0.5"; echo "ALMA_Inference_Wheat_Festival.sh v${ALMA_INFER_VERSION}"
+ #
+ # Runs the trained OlmoEarth-Tiny model over the Meilha AOI and produces
+ # six PNG outputs for crop insurance, traceability, and micro-credit allocation.
+@@ -29,7 +29,15 @@
+ # 0.0.4: the model now writes wheat PROBABILITY, not argmax 0/1: model.yaml
+ # names  class_path: alma_tasks.WheatProbSegmentationTask  for wheat_seg
+ # (alma_tasks.py sits next to this script; works with any rslearn version). The cut-off is a parameter:
+-#   THRESH=0.50 UNC_LO=0.30 UNC_HI=0.70 bash ALMA_Inference_Wheat_Festival.sh ...
++#   THRESH=0.50 bash ALMA_Inference_Wheat_Festival.sh ...
++# 0.0.5 (Dr. Yann, 7 Oct): the wheat / not-wheat cut-off stays 0.50 (same as the
++# earlier binary maps). The uncertain band is no longer fixed at 0.30–0.70 but
++# found with Otsu's method on the probability histogram: 3-class (multi-level)
++# Otsu gives two thresholds, below = confident background, above = confident
++# wheat, between = uncertain. The 2-class Otsu threshold is reported for
++# reference. UNC_METHOD=fixed UNC_LO=.. UNC_HI=.. restores a fixed band.
++# Pixels that are exactly 0.0 (tile seams where no prediction was written; a
++# softmax probability is never exactly 0) are treated as nodata.
+ # Each field also carries prob_hist: 20 bins of 0.05 = share of the field's
+ # pixels in each probability band, so a viewer can recompute area and status
+ # at any cut-off (threshold slider) without the raster.
+@@ -55,15 +63,16 @@
+ FIELDS_GEOJSON="${HOME}/GISDATA/Sharjah_WheatFestival/Sharjah_Wheat_fields_4326.geojson"
+ OUT_DATE=$(date +%Y%m%d)
+ THRESH="${THRESH:-0.50}"     # wheat / not-wheat cut-off on the probability
+-UNC_LO="${UNC_LO:-0.30}"     # uncertain band, lower edge
+-UNC_HI="${UNC_HI:-0.70}"     # uncertain band, upper edge
++UNC_METHOD="${UNC_METHOD:-otsu}"  # otsu: band from 3-class Otsu; fixed: UNC_LO..UNC_HI
++UNC_LO="${UNC_LO:-0.30}"     # uncertain band, lower edge (UNC_METHOD=fixed only)
++UNC_HI="${UNC_HI:-0.70}"     # uncertain band, upper edge (UNC_METHOD=fixed only)
+ OUT_DIR="${SCRATCH}/inference_outputs/${OUT_DATE}"
+ 
+ echo "=== ALMA Wheat Festival — Inference ==="
+ echo "  Season window : ${START_DATE} → ${END_DATE}"
+ echo "  Checkpoint    : ${CHECKPOINT}"
+ echo "  Output dir    : ${OUT_DIR}"
+-echo "  Cut-off       : ${THRESH}   uncertain band: ${UNC_LO}–${UNC_HI}"
++echo "  Cut-off       : ${THRESH}   uncertain band: ${UNC_METHOD} (fixed: ${UNC_LO}–${UNC_HI})"
+ 
+ mkdir -p "${OUT_DIR}"
+ 
+@@ -189,6 +198,7 @@
+ THRESH       = float("${THRESH}")
+ UNC_LO       = float("${UNC_LO}")
+ UNC_HI       = float("${UNC_HI}")
++UNC_METHOD   = "${UNC_METHOD}".strip().lower()
+ N_BINS       = 20          # prob_hist bins of 0.05
+ 
+ DPI          = 150
+@@ -230,6 +240,60 @@
+         "  for wheat_seg (see patch_model_yaml_prob_task.py), and dataset_0 must not\n"
+         "  hold an old 0/1 prediction. Fix and run the inference again.")
+ 
++# Tile seams: exact 0.0 means no prediction was written there -> nodata.
++n_seam = int((prob == 0.0).sum())
++prob[prob == 0.0] = np.nan
++valid = prob[~np.isnan(prob)]
++print(f"  Seam pixels (exactly 0.0) set to nodata: {n_seam}")
++
++# ── Otsu thresholds on the probability histogram ──────────────────────────
++def _hist(v, nbins=256):
++    lo, hi = float(v.min()), float(v.max())
++    counts, edges = np.histogram(v, bins=nbins, range=(lo, hi))
++    centers = (edges[:-1] + edges[1:]) / 2
++    return counts.astype(np.float64), centers
++
++def otsu_2class(v, nbins=256):
++    """Otsu (1979): threshold maximising the between-class variance."""
++    c, x = _hist(v, nbins)
++    w0 = np.cumsum(c); w1 = w0[-1] - w0
++    m = np.cumsum(c * x)
++    mu0 = m / np.maximum(w0, 1e-12)
++    mu1 = (m[-1] - m) / np.maximum(w1, 1e-12)
++    var_b = w0 * w1 * (mu0 - mu1) ** 2
++    return float(x[int(np.argmax(var_b[:-1]))])
++
++def otsu_3class(v, nbins=256):
++    """Multi-level Otsu with three classes: two thresholds (t1 < t2)."""
++    c, x = _hist(v, nbins)
++    P = np.concatenate([[0.0], np.cumsum(c)])
++    S = np.concatenate([[0.0], np.cumsum(c * x)])
++    i = np.arange(1, nbins - 1)[:, None]      # class 1 = bins [0, i)
++    j = np.arange(2, nbins)[None, :]          # class 2 = [i, j), class 3 = [j, n)
++    ok = j > i
++    def term(a, b):
++        w = P[b] - P[a]; s = S[b] - S[a]
++        return np.where(w > 0, s * s / np.maximum(w, 1e-12), 0.0)
++    score = term(0, i) + term(i, j) + term(j, nbins)
++    score = np.where(ok, score, -np.inf)
++    a, b = np.unravel_index(int(np.argmax(score)), score.shape)
++    ii, jj = a + 1, b + 2
++    return float(x[ii - 1]), float(x[jj - 1])
++
++OTSU_T = otsu_2class(valid)
++OTSU_T1, OTSU_T2 = otsu_3class(valid)
++print(f"  Otsu threshold (2 classes): {OTSU_T:.3f}   "
++      f"3-class Otsu thresholds: {OTSU_T1:.3f} / {OTSU_T2:.3f}")
++if UNC_METHOD == "otsu":
++    UNC_LO, UNC_HI = OTSU_T1, OTSU_T2
++print(f"  Uncertain band ({UNC_METHOD}): {UNC_LO:.3f} – {UNC_HI:.3f}   cut-off {THRESH:.2f}")
++(OUT_DIR / "run_params.json").write_text(json.dumps({
++    "threshold": THRESH, "uncertain_method": UNC_METHOD,
++    "uncertain_band": [round(UNC_LO, 4), round(UNC_HI, 4)],
++    "otsu_threshold": round(OTSU_T, 4),
++    "otsu_3class_thresholds": [round(OTSU_T1, 4), round(OTSU_T2, 4)],
++    "seam_pixels_set_nodata": n_seam}, indent=2))
++
+ # Reproject field boundaries to raster CRS (UTM 40N)
+ print("  Loading field boundaries...")
+ fields_wgs = gpd.read_file(FIELDS_FILE)
+@@ -337,7 +401,10 @@
+ _fc = {"type": "FeatureCollection",
+        "name": "field_stats",
+        "alma_run": {"script_version": "${ALMA_INFER_VERSION}",
+-                    "threshold": THRESH, "uncertain_band": [UNC_LO, UNC_HI],
++                    "threshold": THRESH, "uncertain_method": UNC_METHOD,
++                    "uncertain_band": [round(UNC_LO, 4), round(UNC_HI, 4)],
++                    "otsu_threshold": round(OTSU_T, 4),
++                    "otsu_3class_thresholds": [round(OTSU_T1, 4), round(OTSU_T2, 4)],
+                     "prob_hist_bins": [round(i / N_BINS, 2) for i in range(N_BINS + 1)],
+                     "season": [START_DATE, END_DATE]},
+        "features": _feats}
+@@ -504,7 +571,7 @@
+ # This map operationalises the "human-in-the-loop" requirement.
+ print("  04 uncertainty...")
+ unc_mask = ((prob >= UNC_LO) & (prob <= UNC_HI)).astype(np.float32)   # NaN compares False
+-fig, ax = base_fig(f"Model Uncertainty  |  Uncertain pixels: {UNC_LO:.2f} ≤ P ≤ {UNC_HI:.2f}")
++fig, ax = base_fig(f"Model Uncertainty  |  Uncertain pixels: {UNC_LO:.3f} ≤ P ≤ {UNC_HI:.3f} ({UNC_METHOD})")
+ # Base: dim probability
+ ax.imshow(prob, extent=extent, cmap=wheat_cmap, vmin=0, vmax=1,
+           origin="upper", alpha=0.35)
+@@ -663,7 +730,6 @@
+   "host": platform.node(),
+   "season": ["${START_DATE}", "${END_DATE}"],
+   "threshold": float("${THRESH}"),
+-  "uncertain_band": [float("${UNC_LO}"), float("${UNC_HI}")],
+   "checkpoint": {"path": "${CHECKPOINT}", "sha256": sha("${CHECKPOINT}")},
+   "fields_file": {"path": "${FIELDS_GEOJSON}", "sha256": sha("${FIELDS_GEOJSON}")},
+   "result_raster": {"path": "${RESULT_TIF}", "sha256": sha("${RESULT_TIF}")},
+@@ -674,6 +740,10 @@
+     m["versions"] = {"rslearn": getattr(rslearn, "__version__", "?"), "torch": torch.__version__}
+ except Exception:
+     pass
++try:
++    m.update(json.loads((out / "run_params.json").read_text()))
++except Exception:
++    pass
+ (out / "run_manifest.json").write_text(json.dumps(m, indent=2))
+ print("  Wrote run_manifest.json")
+ PYEOF2

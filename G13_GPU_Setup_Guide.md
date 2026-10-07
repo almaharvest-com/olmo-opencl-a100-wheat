@@ -442,6 +442,27 @@ To see whether the server's rslearn has the built-in option: `.venv/bin/python -
 
 Decisions for Shakil and Dr. Yann before these numbers go on the MleihaEarth page: the cut-off, the uncertainty band (or calibration first), and how question 02 ("Are you sure?") is answered.
 
+### 15f. Uncertainty band from Otsu's method (script 0.0.5, 2026-10-07)
+
+Dr. Yann's answer to 15e (7 Oct): **keep the 0.50 cut-off** (it is what the earlier binary maps used), and find the uncertainty with **Otsu's method** (https://en.wikipedia.org/wiki/Otsu%27s_method). For insurance, actuarial certification is a separate, later piece of work; for now the aim is to demonstrate what the model can do.
+
+Script 0.0.5 (`scripts/patches/2026-10-07_otsu_uncertainty/`, diff from 0.0.4 and `RUN_ON_G13.md` included):
+
+- the cut-off stays `THRESH=0.50`, so areas and statuses do not change;
+- the uncertain band comes from **3-class (multi-level) Otsu** on the probability histogram of the whole area: two thresholds, below = confident background, above = confident wheat, between = uncertain (`UNC_METHOD=otsu`, the default; `UNC_METHOD=fixed UNC_LO=.. UNC_HI=..` restores a fixed band);
+- the 2-class Otsu threshold is recorded for reference only;
+- the thresholds go to `run_params.json`, `run_manifest.json` and the GeoJSON header (`alma_run`);
+- pixels that are exactly 0.0 (the tile seams of 15e) are nodata: about 7 ha less field area in 8 fields, active area unchanged;
+- Otsu is written in numpy (no new package) and gives the same thresholds as scikit-image.
+
+Install: copy only the new script (the model, `alma_tasks.py` and `model.yaml` stay as for 0.0.4), set the `CHECKPOINT=` line to `epoch=13-step=812.ckpt`, and run as in 15e but **without** moving `dataset_0`, so the 6 Oct imagery and prediction are reused and the raster stays the same.
+
+Expected on the 6 Oct raster (computed from the file): 2-class Otsu 0.458; 3-class Otsu **0.430 / 0.492**; 1179.4 ha and 34 / 2 / 1 fields as before; **5 fields flagged** (10, 27, 29, 32, 34: the inactive and partial ones plus two borderline active ones) instead of 37; mean credit score **73**. About 51 % of the whole area (mostly desert around the fields) is uncertain.
+
+**Run on g13 (2026-10-07), results in `g13_inference_20261007/`:** exactly as expected. The probability raster is byte-identical to 6 Oct (the model step reused `dataset_0`), so only the field figures changed: same 1179.4 ha and 34 / 2 / 1 statuses; 5 fields flagged (10, 27, 29, 32, 34); field uncertainty now 0.2 % to 67 % (median 10 %) instead of 94 % to 100 %; credit scores 27 to 87 (mean 73) instead of 21 to 67 (mean 56). Removing the seam pixels lowered the area of 8 fields by 0.4 to 1.6 ha each (total 1440.4 → 1433.1 ha) and raised their `active_frac` slightly; no status changed.
+
+Note: the upper Otsu threshold (0.492) is just below the cut-off (0.50), so pixels between 0.492 and 0.50 count as neither uncertain nor wheat. With these numbers that is a thin slice; mention it to Dr. Yann if the gap grows in a later run.
+
 ---
 
 ## 16. Copy the results to your laptop
@@ -515,7 +536,7 @@ Dr. Yann's own map viewer (sharjah.almamaps.ai) can use the same GeoJSON for the
 | The `output_probs` check prints `False` | The server's rslearn is too old for `output_probs`; use `alma_tasks.py` (15e). Do not put `output_probs` into `model.yaml`. |
 | `ModuleNotFoundError: alma_tasks` | `alma_tasks.py` must sit next to `ALMA_Inference_Wheat_Festival.sh` (0.0.4 adds that folder to `PYTHONPATH`). |
 | `Retrying after catching error ... timed out` during inference | Sentinel-2 download retries; wait. If the log stops for more than 20 minutes, stop and start the same command again: finished downloads are kept. |
-| All 37 fields flagged, credit scores near 56 (script 0.0.4) | Not a bug: the model's probabilities lie between about 0.35 and 0.70 (15e). The uncertainty band and cut-off need to be chosen for this model. |
+| All 37 fields flagged, credit scores near 56 (script 0.0.4) | Not a bug: the model's probabilities lie between about 0.35 and 0.70, so the fixed 0.30–0.70 band covers everything (15e). Use script 0.0.5, which takes the band from Otsu's method (15f). |
 
 ---
 

@@ -24,6 +24,10 @@ Dr. Yann's patch (`scripts/patches/`) makes `ALMA_Inference_Wheat_Festival.sh` a
 
 Up to 0.0.3 the raster held 0/1 class labels, so `mean_prob` equalled `active_frac` and `uncertainty_frac` was always 0. The fix (`scripts/patches/2026-10-06_probability_output/`) needs no retraining: a small task class, `alma_tasks.py`, makes the model write the wheat probability (the g13 rslearn is too old for the built-in `output_probs` option), and script 0.0.4 adds a cut-off parameter (`THRESH`), per-field probability histograms for a threshold slider, `threshold_sweep.csv` and a run manifest with checksums and the imagery used. At cut-off 0.50 the result equals the earlier runs (1179.4 ha, 34 of 37 active), but the probabilities are squeezed around 0.5 (maximum 0.682), so all 37 fields fall in the 0.30–0.70 uncertainty band and the mean credit score is 56. The cut-off and the uncertainty band must be chosen, or the model calibrated, before these figures are published. Results in `g13_inference_20261006/`; details and commands in section 15e of the guide.
 
+### Update 2026-10-07: uncertainty band from Otsu's method (script 0.0.5)
+
+Following Dr. Yann: the cut-off stays 0.50, and the uncertain band is now found with 3-class Otsu on the probability histogram instead of the fixed 0.30–0.70 (`scripts/patches/2026-10-07_otsu_uncertainty/`). On the 6 Oct raster this gives a band of 0.430–0.492, 5 flagged fields instead of 37 and a mean credit score of 73; areas and statuses are unchanged. Tile-seam pixels (exactly 0.0) are now nodata. Run on g13 confirmed these figures; results in `g13_inference_20261007/`. Section 15f of the guide.
+
 ## Start here
 
 Read **[G13_GPU_Setup_Guide.md](G13_GPU_Setup_Guide.md)**. It explains every step in plain English, with the commands, what you should see, and fixes for the problems we met.
@@ -63,7 +67,8 @@ GPU=1 ~/g13_setup.sh bg infer
 | `g13_inference/` | results of the first inference run (script 0.0.2): six PNG maps, `field_stats.csv`, `result_epsg32640_0.tif` |
 | `g13_inference_20261005/` | results of the second inference run (script 0.0.3): the same files plus `field_stats.geojson` |
 | `g13_inference_20261006/` | results of the third inference run (script 0.0.4): wheat probabilities, `threshold_sweep.csv`, probability GeoTIFF, `run_manifest.json`, `provenance/` |
-| `scripts/patches/` | Dr. Yann's patch adding the GeoJSON output (`.diff`) and his changelog; `2026-10-06_probability_output/` with the probability fix (script 0.0.4, `alma_tasks.py`, `RUN_ON_G13.md`) |
+| `g13_inference_20261007/` | results of the fourth inference run (script 0.0.5): uncertainty band from Otsu's method, `run_params.json`; same raster as 6 Oct |
+| `scripts/patches/` | Dr. Yann's patch adding the GeoJSON output (`.diff`) and his changelog; `2026-10-06_probability_output/` with the probability fix (script 0.0.4, `alma_tasks.py`, `RUN_ON_G13.md`); `2026-10-07_otsu_uncertainty/` with the Otsu change (script 0.0.5) |
 
 ## Requirements
 

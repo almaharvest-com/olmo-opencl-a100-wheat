@@ -1,0 +1,14 @@
+{
+  "threshold": 0.5,
+  "uncertain_method": "otsu",
+  "uncertain_band": [
+    0.43,
+    0.4919
+  ],
+  "otsu_threshold": 0.4577,
+  "otsu_3class_thresholds": [
+    0.43,
+    0.4919
+  ],
+  "seam_pixels_set_nodata": 16368
+}
